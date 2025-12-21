@@ -244,6 +244,7 @@ def main():
     
     # 2. 尋找所有數據資料檔 (假設是以 .xlsx 結尾,但排除儀器編號檔案)
     data_files = []
+    error_count = 0
     for file in os.listdir(INPUT_DIR):
         if file.endswith('.xlsx') and file != os.path.basename(INSTRUMENT_FILE):
             # 確認檔名包含地名格式 (XX縣/市-XX鄉/區/鎮)
@@ -268,6 +269,7 @@ def main():
             print(f"處理 {data_file} 時發生錯誤: {e}")
             import traceback
             traceback.print_exc()
+            error_count += 1
     
     # 5. 儲存不確定儀器清單 (如果有的話)
     if uncertain_instruments_data:
@@ -275,12 +277,34 @@ def main():
         df_uncertain = pd.DataFrame(uncertain_instruments_data)
         df_uncertain.to_csv(uncertain_summary_path, index=False, encoding='utf-8-sig') # Use utf-8-sig for BOM
         print(f"\n已儲存不確定儀器清單: {uncertain_summary_path}")
+
+    # 6. 清理空資料夾
+    cleanup_empty_dirs(SEPERATED_DIR)
     
     print("\n" + "=" * 60)
     print("處理完成!")
     print(f"輸出目錄: {SEPERATED_DIR}")
     print("=" * 60)
 
+    if error_count > 0:
+        print(f"\n警告: 處理過程中出現 {error_count} 個錯誤。")
+        sys.exit(1)
+
+
+def cleanup_empty_dirs(path):
+    """
+    從下而上遍歷路徑，刪除所有空資料夾。
+    """
+    print(f"\n正在清理輸出目錄中的空資料夾: '{path}'...")
+    for root, dirs, files in os.walk(path, topdown=False):
+        for d in dirs:
+            dir_path = os.path.join(root, d)
+            try:
+                if not os.listdir(dir_path):
+                    print(f"  - 正在移除空資料夾: {dir_path}")
+                    os.rmdir(dir_path)
+            except OSError as e:
+                print(f"  - 移除資料夾 {dir_path} 失敗: {e}")
 
 if __name__ == "__main__":
     main()
