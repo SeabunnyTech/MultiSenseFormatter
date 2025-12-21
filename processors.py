@@ -78,8 +78,16 @@ class BaseProcessor(ABC):
     def _process_file(self, i, total_files, input_file_path, counters):
         """Processes a single file with all checks and logic."""
         file_name = os.path.basename(input_file_path)
+
+        # Extract location name from path for clearer progress display
+        try:
+            relative_dir = os.path.relpath(os.path.dirname(input_file_path), self.input_root_dir)
+            location_name = relative_dir.split(os.sep)[0]
+        except (ValueError, IndexError):
+            location_name = "Unknown"
+
         progress_prefix = f"[{i:>{len(str(total_files))}}/{total_files}]"
-        print(f"{progress_prefix} Processing '{file_name}'... ")
+        print(f"{progress_prefix} Processing [{location_name}] '{file_name}'... ")
 
         try:
             relative_path = os.path.relpath(os.path.dirname(input_file_path), self.input_root_dir)
@@ -153,17 +161,25 @@ class BaseProcessor(ABC):
                 except OSError as e:
                     print(f"  - Error removing directory {dir_path}: {e}")
 
-class WaterLevelProcessor(BaseProcessor):
-    """Specific processor for water level sensors."""
+
+
+class ZeroingProcessor(BaseProcessor):
+    """
+    Specific processor for sensors that require zeroing on multiple value columns.
+    """
 
     def _process_data(self, df, matched_format):
         """
-        Implements the data processing logic for water level data
-        using the provided matched format configuration.
+        Implements data processing for multi-value sensors. It iterates through
+        a list of value columns defined in the config.
         """
-        value_col = matched_format["value_column"]
-        output_col = matched_format["output_zeroed_column_name"]
-        time_col = '系統時間' if '系統時間' in df.columns else '時間'
+        # Get the list of value column configurations
+        value_configs = matched_format["value_columns"]
+        
+        # Determine the time column, supporting single or multiple time-related columns
+        time_col = matched_format.get("time_column", "系統時間")
+        if time_col not in df.columns and 'Time' in df.columns:
+             time_col = 'Time' # Fallback for flexibility
 
         df[time_col] = pd.to_datetime(df[time_col].astype(str))
         df = df.sort_values(by=time_col).reset_index(drop=True)
@@ -186,13 +202,24 @@ class WaterLevelProcessor(BaseProcessor):
             print(f"{Colors.YELLOW}  -> SKIPPED (Zero date {self.zero_date} not found in available data range){Colors.ENDC}")
             return None
         
-        zero_value = zero_row[value_col].iloc[0]
-        df_filtered[output_col] = df_filtered[value_col] - zero_value
+        # Find zero values for all specified columns
+        zero_values = {}
+        for v_conf in value_configs:
+            col_name = v_conf["name"]
+            zero_values[col_name] = zero_row[col_name].iloc[0]
 
+        # Calculate zeroed values for all specified columns
+        for v_conf in value_configs:
+            col_name = v_conf["name"]
+            output_name = v_conf["output_name"]
+            df_filtered[output_name] = df_filtered[col_name] - zero_values[col_name]
+
+        # Prepare the output DataFrame dynamically
         output_df = pd.DataFrame()
-        output_df[0] = df_filtered[time_col].dt.strftime('%Y/%m/%d')
-        output_df[1] = df_filtered[time_col].dt.strftime('%Y/%m/%d %H:%M')
-        output_df[2] = df_filtered[value_col]
-        output_df[3] = df_filtered[output_col]
+        output_df[time_col] = df_filtered[time_col].dt.strftime('%Y/%m/%d %H:%M')
+        
+        for v_conf in value_configs:
+            output_df[v_conf["name"]] = df_filtered[v_conf["name"]]
+            output_df[v_conf["output_name"]] = df_filtered[v_conf["output_name"]]
         
         return output_df

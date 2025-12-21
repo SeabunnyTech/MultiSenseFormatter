@@ -1,20 +1,21 @@
 import sys
 import os
-from vars import WATER_LEVEL_CONFIG, ZERO_DATE
-from processors import WaterLevelProcessor
+from vars import WATER_LEVEL_CONFIG, EXTENSOMETER_CONFIG, ZERO_DATE
+from processors import ZeroingProcessor
 
 def main():
     """
     Main entry point for running sensor data processors.
     """
-    # Currently, we only have one processor.
-    # In the future, you could add logic here to select different
-    # processors based on command-line arguments or other settings.
-    
-    print("Initializing Water Level Processor...")
-    processor = WaterLevelProcessor(config=WATER_LEVEL_CONFIG, zero_date_str=ZERO_DATE)
-    
-    processor.run()
+    # --- 1. Run the processor for Water Level data ---
+    print("Initializing Processor for Water Level...")
+    water_processor = ZeroingProcessor(config=WATER_LEVEL_CONFIG, zero_date_str=ZERO_DATE)
+    water_processor.run()
+
+    # --- 3. Run the processor for Surface Extensometer data ---
+    print("\nInitializing Processor for Surface Extensometer...")
+    extensometer_processor = ZeroingProcessor(config=EXTENSOMETER_CONFIG, zero_date_str=ZERO_DATE)
+    extensometer_processor.run()
 
 if __name__ == "__main__":
     # Ensure the console can display Unicode characters correctly
