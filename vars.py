@@ -88,3 +88,23 @@ EXTENSOMETER_CONFIG = {
         EXTENSOMETER_FORMAT_V1,
     ]
 }
+
+# 4. Inclinometer
+INCLINOMETER_FORMAT_V1 = {
+    "id": "Standard Inclinometer",
+    "expected_columns": ['儀器名稱', '系統時間', '方位一觀測值', '方位二觀測值', '方位一累積變位量', '方位二累積變位量', '方位一1日變位量', '方位二1日變位量'],
+    "time_column": "系統時間",
+    "value_columns": [
+        {"name": "方位一觀測值", "output_name": "方位一歸零值"},
+        {"name": "方位二觀測值", "output_name": "方位二歸零值"}
+    ]
+}
+INCLINOMETER_CONFIG = {
+    "sensor_name": "Inclinometer",
+    "target_subdir": "地表傾斜計(雙軸)",
+    "input_path": SEPERATED_DIR,
+    "output_path": r"data\zeroed",
+    "formats": [
+        INCLINOMETER_FORMAT_V1,
+    ]
+}
