@@ -21,19 +21,38 @@ echo.
 echo ====================================================================
 echo  Executing run_processor.py
 echo  Settings will be loaded from vars.py
-echo  Output will be shown here and logged to: %log_path%
 echo ====================================================================
 echo.
 
-rem Set Python IO encoding to UTF-8 and execute via PowerShell, ensuring all parts handle UTF-8
 set PYTHONIOENCODING=UTF-8
-powershell -Command "$OutputEncoding = [System.Text.Encoding]::UTF8; python -u -m run_processor 2>&1 | Tee-Object -FilePath \"%log_path%\""
+
+rem Check if --force or -f flag is present
+set "FORCE_MODE=0"
+for %%a in (%*) do (
+    if "%%a"=="--force" set "FORCE_MODE=1"
+    if "%%a"=="-f" set "FORCE_MODE=1"
+)
+
+if "%FORCE_MODE%"=="1" (
+    rem Force mode: use Tee-Object for logging
+    echo  Mode: Force [logging to: %log_path%]
+    echo ====================================================================
+    echo.
+    powershell -Command "$OutputEncoding = [System.Text.Encoding]::UTF8; python -u -m run_processor %* 2>&1 | Tee-Object -FilePath \"%log_path%\""
+) else (
+    rem Interactive mode: run directly without Tee-Object
+    echo  Mode: Interactive [no logging]
+    echo  Tip: Use --force to enable logging
+    echo ====================================================================
+    echo.
+    python -u -m run_processor %*
+)
 
 rem --- Check for errors and display summary ---
 if %ERRORLEVEL% neq 0 (
     echo.
     echo ===================== SCRIPT FINISHED WITH NON-ZERO EXIT CODE ======================
-    echo An error occurred during script execution. Please review the output above and the log file for details.
+    echo An error occurred during script execution. Please review the output above.
     echo ====================================================================================
 ) else (
     echo.
