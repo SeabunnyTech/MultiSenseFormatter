@@ -47,7 +47,7 @@ SENSOR_CONFIG = {
 ## 新增感測器步驟
 
 1. 在 `vars.py` 新增 FORMAT 和 CONFIG
-2. 在 `run_processor.py` 初始化對應的處理器並加入執行列表
+2. 在 `run_processor.py` 的 `SENSOR_REGISTRY` 加入一筆註冊
 3. 選擇適合的處理器類型（或繼承 BaseProcessor 寫新的）
 
 ## 資料流程
@@ -75,13 +75,12 @@ data/zeroed/         歸零後 CSV 輸出
 
 ## 目前啟用的感測器
 
-查看 `run_processor.py` 中的 `processors` 列表確認實際執行的處理器。
+查看 `run_processor.py` 中的 `SENSOR_REGISTRY` 確認已註冊的處理器。
 
 ## 測試
 
 ```bash
-run_tests.bat        # 執行 pytest
-pytest tests/        # 或直接執行
+pytest tests/
 ```
 
 ## 注意事項

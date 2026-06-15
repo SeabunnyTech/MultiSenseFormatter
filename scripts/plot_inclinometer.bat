@@ -1,0 +1,42 @@
+@echo off
+chcp 65001 > nul
+CALL vars.bat
+
+rem --- Generate a reliable timestamp for the log file ---
+for /f "tokens=2 delims==" %%a in ('wmic os get localdatetime /value') do set "dt=%%a"
+set "timestamp=%dt:~0,8%_%dt:~8,6%"
+set "log_filename=plot_inclinometer_log_%timestamp%.log"
+
+set "log_dir=logs"
+if not exist "%log_dir%" (
+    mkdir "%log_dir%"
+)
+
+set "log_path=%log_dir%\%log_filename%"
+
+echo.
+echo ====================================================================
+echo  Executing plot_inclinometer.py
+echo  Output will be shown here and logged to: %log_path%
+echo ====================================================================
+echo.
+
+rem Set Python IO encoding to UTF-8 and execute via PowerShell
+set PYTHONIOENCODING=UTF-8
+powershell -Command "$OutputEncoding = [System.Text.Encoding]::UTF8; python -u \".\plot_inclinometer.py\" 2>&1 | Tee-Object -FilePath \"%log_path%\""
+
+rem --- Check for errors and display summary ---
+if %ERRORLEVEL% neq 0 (
+    echo.
+    echo ===================== SCRIPT FINISHED WITH NON-ZERO EXIT CODE ======================
+    echo An error occurred during script execution. Please review the output above and the log file for details.
+    echo ====================================================================================
+) else (
+    echo.
+    echo ====================================================================
+    echo  Script finished successfully.
+    echo  Output images: inclinometer_profile.png, inclinometer_combined.png
+    echo ====================================================================
+)
+echo.
+pause

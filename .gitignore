@@ -1,4 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+
+# Conda / venv
 .env/
+
+# Data (由使用者自行準備，不進版控)
 data/
 logs/
-*pyc
+
+# 生成的圖片
+*.png
+
+# 開發工具
+.claude/
+
+# 參考程式碼
+excode/

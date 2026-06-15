@@ -3,6 +3,7 @@
 # ==============================================================================
 
 INSTRUMENT_FILE = r"data\20251031_25處MT潛勢區儀器編號.xlsx"  # 儀器編號對照表
+SATELLITE_TABLE_FILE = r"data\IncidenceAngle_StatisticsTable.xlsx"  # 衛星入射角表
 INPUT_DIR = r"data\input"                                      # 原始資料輸入
 SEPERATED_DIR = r"data\seperated"                              # 拆分後資料
 ZEROED_DIR = r"data\zeroed"                                    # 歸零後輸出
@@ -180,10 +181,54 @@ GNSS_FORMAT_V1 = {
     }
 }
 
+# 單頻GPS位移：欄位為 E/N/H（無「解算後」前綴、無每日欄位），併入 GNSS 處理器一併歸零
+# 數值同為 TWD97/TM2 公尺，歸零後 ×1000 轉 mm，並可一併產生 LOS 投影
+GNSS_FORMAT_V2 = {
+    "id": "單頻GPS",
+    "expected_columns": [
+        '儀器名稱', '系統時間', 'E', 'N', 'H',
+        '方位角', '三軸變位速率', '平面變位速率'
+    ],
+    "time_column": "系統時間",
+    "value_columns": [
+        {"name": "E", "output_name": "累積E位移(mm)"},
+        {"name": "N", "output_name": "累積N位移(mm)"},
+        {"name": "H", "output_name": "累積U位移(mm)"}
+    ],
+    "final_columns": [
+        '星曆', '系統時間', '解算後E值', '解算後N值', '解算後U值',
+        '累積E位移(mm)', '累積N位移(mm)', '累積U位移(mm)'
+    ],
+    "rename_map": {
+        "E": "解算後E值",
+        "N": "解算後N值",
+        "H": "解算後U值"
+    }
+}
+
 GNSS_CONFIG = {
     "sensor_name": "GNSS",
     "target_subdir": "GNSS地表變位",
     "input_path": SEPERATED_DIR,
     "output_path": ZEROED_DIR,
-    "formats": [GNSS_FORMAT_V1],
+    "formats": [GNSS_FORMAT_V1, GNSS_FORMAT_V2],
+    # --------------------------------------------------------------------------
+    # 多衛星 LOS 投影設定
+    #
+    # 從衛星入射角表讀取所有軌道/Swath 組合，為每個組合生成獨立的 LOS 投影檔案
+    # 公式: d_LOS = -sin(θ)cos(φ)·dE + sin(θ)sin(φ)·dN + cos(θ)·dU
+    #
+    # 參數說明:
+    #   file             - 衛星入射角表 Excel 路徑
+    #   heading_angles   - 升軌/降軌的飛行方向角（度）
+    #   los_output_name  - LOS 位移欄位的輸出名稱
+    # --------------------------------------------------------------------------
+    "satellite_table": {
+        "file": SATELLITE_TABLE_FILE,
+        "heading_angles": {
+            "ASC": 350,   # 升軌飛行方向角
+            "DES": 190,   # 降軌飛行方向角
+        },
+        "los_output_name": "累積LOS位移(mm)",
+    },
 }

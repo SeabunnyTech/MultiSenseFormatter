@@ -1,4 +1,4 @@
-name: excel-splitter
+name: multi-sense-formatter
 channels:
   - conda-forge
   - defaults
