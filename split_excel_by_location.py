@@ -333,27 +333,53 @@ def process_data_file(data_file, instrument_mapping, output_dir, uncertain_instr
             print(f"    已儲存: {output_file}")
 
 
+def parse_args():
+    """解析命令列參數"""
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="數據資料檔拆分腳本",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+範例:
+  python split_excel_by_location.py                                    # 使用預設路徑
+  python split_excel_by_location.py --batch data/batches/08_監測數據   # 批次模式
+        """
+    )
+    parser.add_argument(
+        '--batch', '-b',
+        type=str,
+        metavar='PATH',
+        help='批次資料夾路徑，輸出至 {batch}-seperated'
+    )
+    return parser.parse_args()
+
+
 def main():
     """主程式"""
-    # ===== 設定區域 =====
-    # 請修改以下路徑為你的實際路徑
+    args = parse_args()
+
     from vars import INSTRUMENT_FILE, INPUT_DIR, SEPERATED_DIR
-    
-    # ===== 程式執行 =====
-    
+
+    if args.batch:
+        input_dir = args.batch.rstrip('/\\')
+        output_dir = input_dir + '-seperated'
+    else:
+        input_dir = INPUT_DIR
+        output_dir = SEPERATED_DIR
+
     print("=" * 60)
     print("數據資料檔拆分程式")
     print("=" * 60)
-    
+
     # 1. 載入儀器編號映射
     instrument_mapping = load_instrument_mapping(INSTRUMENT_FILE)
-    
+
     # 2. 尋找所有數據資料檔 (xlsx 檔案及包含 CSV 的資料夾)
     data_files = []
     csv_folders = []
     error_count = 0
-    for entry in os.listdir(INPUT_DIR):
-        full_path = os.path.join(INPUT_DIR, entry)
+    for entry in os.listdir(input_dir):
+        full_path = os.path.join(input_dir, entry)
         # 確認檔名/資料夾名包含地名格式 (XX縣/市-XX鄉/區/鎮)
         if not re.match(r'.*?-.*?-', entry):
             continue
@@ -371,17 +397,17 @@ def main():
         print(f"找到 {len(csv_folders)} 個 CSV 資料夾:")
         for f in csv_folders:
             print(f"  - {os.path.basename(f)}")
-    
+
     # 3. 建立輸出目錄
-    os.makedirs(SEPERATED_DIR, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
     # 初始化不確定儀器清單
     uncertain_instruments_data = []
-    
+
     # 4. 處理每個數據資料檔
     for data_file in data_files:
         try:
-            process_data_file(data_file, instrument_mapping, SEPERATED_DIR, uncertain_instruments_data)
+            process_data_file(data_file, instrument_mapping, output_dir, uncertain_instruments_data)
         except Exception as e:
             print(f"處理 {data_file} 時發生錯誤: {e}")
             import traceback
@@ -391,26 +417,26 @@ def main():
     # 4b. 處理 CSV 資料夾
     for csv_folder in csv_folders:
         try:
-            process_csv_folder(csv_folder, instrument_mapping, SEPERATED_DIR)
+            process_csv_folder(csv_folder, instrument_mapping, output_dir)
         except Exception as e:
             print(f"處理 {csv_folder} 時發生錯誤: {e}")
             import traceback
             traceback.print_exc()
             error_count += 1
-    
+
     # 5. 儲存不確定儀器清單 (如果有的話)
     if uncertain_instruments_data:
-        uncertain_summary_path = os.path.join(SEPERATED_DIR, 'uncertain_instruments_summary.csv')
+        uncertain_summary_path = os.path.join(output_dir, 'uncertain_instruments_summary.csv')
         df_uncertain = pd.DataFrame(uncertain_instruments_data)
-        df_uncertain.to_csv(uncertain_summary_path, index=False, encoding='utf-8-sig') # Use utf-8-sig for BOM
+        df_uncertain.to_csv(uncertain_summary_path, index=False, encoding='utf-8-sig')
         print(f"\n已儲存不確定儀器清單: {uncertain_summary_path}")
 
     # 6. 清理空資料夾
-    cleanup_empty_dirs(SEPERATED_DIR)
-    
+    cleanup_empty_dirs(output_dir)
+
     print("\n" + "=" * 60)
     print("處理完成!")
-    print(f"輸出目錄: {SEPERATED_DIR}")
+    print(f"輸出目錄: {output_dir}")
     print("=" * 60)
 
     if error_count > 0:

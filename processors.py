@@ -20,7 +20,7 @@ class BaseProcessor(ABC):
     支援同一感測器的多種表頭格式
     """
 
-    def __init__(self, config, zero_date_str, force_overwrite=False):
+    def __init__(self, config, zero_date_str, force_overwrite=False, zero_date_map=None):
         self.config = config
         self.sensor_name = config["sensor_name"]
         self.target_subdir = config["target_subdir"]
@@ -30,6 +30,11 @@ class BaseProcessor(ABC):
         self.force_overwrite = force_overwrite
 
         self.zero_date = self._parse_zero_date(zero_date_str)
+        self.default_zero_date = self.zero_date
+        self.zero_date_map = {}
+        if zero_date_map:
+            for k, v in zero_date_map.items():
+                self.zero_date_map[k] = self._parse_zero_date(v)
 
     def _parse_zero_date(self, zero_date_str):
         """解析歸零日期字串"""
@@ -202,6 +207,11 @@ class BaseProcessor(ABC):
         """處理單一檔案"""
         file_name = os.path.basename(input_file_path)
         location_name = self._get_location_name(input_file_path)
+
+        # 按站號套用歸零日期
+        if self.zero_date_map:
+            station_num = location_name.split('_')[0]
+            self.zero_date = self.zero_date_map.get(station_num, self.default_zero_date)
 
         # 顯示進度
         progress_prefix = f"[{i:>{len(str(total_files))}}/{total_files}]"
@@ -400,9 +410,9 @@ class SeasonalRainfallProcessor(BaseProcessor):
     每個季節開始時累積歸零
     """
 
-    def __init__(self, config, force_overwrite=False):
+    def __init__(self, config, force_overwrite=False, zero_date_map=None):
         # 雨量計不使用歸零日期，傳入一個不影響處理的預設值
-        super().__init__(config, zero_date_str="1900-01-01", force_overwrite=force_overwrite)
+        super().__init__(config, zero_date_str="1900-01-01", force_overwrite=force_overwrite, zero_date_map=zero_date_map)
         self.enable_cumulative = False  # 不使用通用累計邏輯
 
         # 季節設定
@@ -490,8 +500,8 @@ class GNSSProcessor(BaseProcessor):
     7.  可選：將三維位移投影至 SAR 雷達視線方向 (LOS)
     """
 
-    def __init__(self, config, zero_date_str, force_overwrite=False):
-        super().__init__(config, zero_date_str, force_overwrite)
+    def __init__(self, config, zero_date_str, force_overwrite=False, zero_date_map=None):
+        super().__init__(config, zero_date_str, force_overwrite, zero_date_map=zero_date_map)
         # 用於暫存 TXT 輸出資料
         self._txt_output_df = None
         # 多衛星 LOS 投影設定
@@ -603,6 +613,11 @@ class GNSSProcessor(BaseProcessor):
         """處理單一檔案（覆寫以支援額外 TXT 輸出）"""
         file_name = os.path.basename(input_file_path)
         location_name = self._get_location_name(input_file_path)
+
+        # 按站號套用歸零日期
+        if self.zero_date_map:
+            station_num = location_name.split('_')[0]
+            self.zero_date = self.zero_date_map.get(station_num, self.default_zero_date)
 
         # 顯示進度
         progress_prefix = f"[{i:>{len(str(total_files))}}/{total_files}]"
@@ -730,7 +745,7 @@ class GNSSProcessor(BaseProcessor):
             if col_name not in zero_row.columns:
                 print(f"{Colors.RED}  -> 錯誤 (欄位 '{col_name}' 不存在){Colors.ENDC}")
                 raise ValueError(f"欄位 '{col_name}' 不存在")
-            zero_values[col_name] = zero_row[col_name].iloc[0]
+            zero_values[col_name] = pd.to_numeric(zero_row[col_name], errors='coerce').iloc[0]
 
         # 4. 套用歸零計算與單位轉換 (m -> mm)
         for v_conf in value_configs:

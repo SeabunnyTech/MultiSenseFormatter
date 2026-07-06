@@ -17,6 +17,7 @@ import argparse
 import csv
 import math
 import os
+import re
 import struct
 import sys
 from datetime import datetime
@@ -345,6 +346,282 @@ def save_timeseries_csv(timeseries, output_path, header=("日期", "累積變形
 
 
 # ==============================================================================
+# 批次目錄自動發現
+# ==============================================================================
+
+
+def detect_data_fields(records):
+    """Auto-detect Field columns (Field5, Field6, ...) from records"""
+    if not records:
+        return []
+    fields = [k for k in records[0].keys() if k.startswith('Field')]
+    return sorted(fields, key=lambda k: int(k.replace('Field', '')))
+
+
+def load_field_dates(csv_path):
+    """
+    Load field-to-date mapping from a CSV file.
+    Expected format (no header): Field5,2022/01/23
+    """
+    mapping = {}
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) >= 2 and row[0].strip().startswith('Field'):
+                mapping[row[0].strip()] = row[1].strip()
+    return mapping
+
+
+def load_date_mappings(batch_dir):
+    """
+    Load T*.xlsx date mapping files from batch directory.
+
+    Each xlsx contains a single column of dates (YYYYMMDD format).
+    Returns {field_count: field_date_map} so the correct mapping
+    can be selected based on a shapefile's field count.
+    """
+    import pandas as pd
+    mappings = {}
+    for f in sorted(os.listdir(batch_dir)):
+        if not (f.startswith('T') and f.endswith('.xlsx')):
+            continue
+        df = pd.read_excel(os.path.join(batch_dir, f), header=None)
+        date_list = []
+        for d in df[0].tolist():
+            s = str(d).strip()
+            if len(s) == 8 and s.isdigit():
+                date_list.append(f"{s[:4]}/{s[4:6]}/{s[6:8]}")
+        fdm = {f"Field{5+i}": ds for i, ds in enumerate(date_list)}
+        mappings[len(fdm)] = fdm
+        print(f"  {f}: {len(fdm)} 個日期 ({date_list[0]}~{date_list[-1]})")
+    return mappings
+
+
+def read_gnss_coords_from_dir(gnss_dir):
+    """
+    Read GNSS instrument names and average TWD97 coordinates from CSV files.
+
+    Returns list of {"name": str, "e": float, "n": float}
+    """
+    import pandas as pd
+    instruments = []
+
+    for f in sorted(os.listdir(gnss_dir)):
+        if not f.endswith('.csv'):
+            continue
+        path = os.path.join(gnss_dir, f)
+        try:
+            df = pd.read_csv(path, low_memory=False)
+            df.columns = [c.strip() for c in df.columns]
+
+            e_col = next((c for c in df.columns if c in ('解算後E值', 'E')), None)
+            n_col = next((c for c in df.columns if c in ('解算後N值', 'N')), None)
+
+            if e_col and n_col:
+                e_val = pd.to_numeric(df[e_col], errors='coerce').mean()
+                n_val = pd.to_numeric(df[n_col], errors='coerce').mean()
+                if pd.notna(e_val) and pd.notna(n_val):
+                    name = os.path.splitext(f)[0]
+                    instruments.append({"name": name, "e": e_val, "n": n_val})
+        except Exception as e:
+            print(f"  警告: 讀取 {f} 失敗 ({e})")
+
+    return instruments
+
+
+def discover_batch_sites(batch_dir, gnss_source_dir):
+    """
+    Auto-discover InSAR shapefiles and match to GNSS instrument coordinates.
+
+    Args:
+        batch_dir: Directory containing InSAR shapefiles ({NNN}_defo_simp_*.shp)
+        gnss_source_dir: Directory containing separated monitoring data
+                         ({NNN}_{location}/GNSS地表變位/)
+
+    Returns:
+        List of site configs compatible with run_batch()
+    """
+    sites = []
+
+    # Find all complete shapefiles (must have both .shp and .dbf)
+    shp_files = {}
+    for f in os.listdir(batch_dir):
+        if f.endswith('.shp'):
+            dbf_path = os.path.join(batch_dir, f.replace('.shp', '.dbf'))
+            if not os.path.exists(dbf_path):
+                print(f"  警告: {f} 缺少 .dbf 檔，跳過")
+                continue
+            match = re.match(r'^(\d+)_', f)
+            if match:
+                shp_files[match.group(1)] = os.path.join(batch_dir, f)
+
+    if not shp_files:
+        dbf_only = [f for f in os.listdir(batch_dir) if f.endswith('.dbf')]
+        if dbf_only:
+            print(f"錯誤: 找到 {len(dbf_only)} 個 .dbf 檔案但無對應 .shp")
+            print(f"  InSAR 提取需要完整 shapefile（含 .shp 座標檔）")
+            print(f"  .dbf 只有屬性資料（時間序列數值），沒有空間座標")
+            for f in dbf_only:
+                print(f"    - {f}")
+        else:
+            print(f"警告: {batch_dir} 中未找到 InSAR 資料檔")
+        return sites
+
+    # Match to monitoring data
+    if not os.path.isdir(gnss_source_dir):
+        print(f"錯誤: GNSS 資料目錄不存在: {gnss_source_dir}")
+        return sites
+
+    station_dirs = {}
+    for d in os.listdir(gnss_source_dir):
+        match = re.match(r'^(\d+)_', d)
+        if match:
+            station_dirs[match.group(1)] = d
+
+    for station_num, shp_path in sorted(shp_files.items()):
+        station_dir_name = station_dirs.get(station_num)
+        if not station_dir_name:
+            print(f"  站號 {station_num}: 在 {gnss_source_dir} 中找不到對應站點")
+            continue
+
+        gnss_dir = os.path.join(gnss_source_dir, station_dir_name, 'GNSS地表變位')
+        if not os.path.isdir(gnss_dir):
+            print(f"  站號 {station_num} ({station_dir_name}): 無 GNSS 資料")
+            continue
+
+        instruments = read_gnss_coords_from_dir(gnss_dir)
+        if not instruments:
+            print(f"  站號 {station_num} ({station_dir_name}): GNSS 資料中無法讀取座標")
+            continue
+
+        sites.append({
+            "site": station_dir_name,
+            "out_subdir": os.path.join(station_dir_name, 'GNSS地表變位'),
+            "shp": shp_path,
+            "instruments": instruments,
+        })
+        print(f"  站號 {station_num}: {station_dir_name} — {len(instruments)} 支 GNSS 儀器")
+
+    return sites
+
+
+# 非 GNSS 感測器類型（座標來源為儀器清單，非資料檔本身）
+NON_GNSS_SENSORS = ['水位觀測井', '地表伸縮計', '地表傾斜計(雙軸)', '雨量計']
+
+
+def read_instrument_list(xlsx_path):
+    """
+    讀取「範圍內儀器清單」Excel，建立 儀器編號 → WGS84 座標 對照。
+
+    欄位（工作表1，無標準表頭）：
+      0=站點名稱  3=儀器類別  6=設備編號  11=Lat  12=Log(經度)
+
+    Returns:
+        list of dict {station, type, id, lat, lon}（僅保留座標合理者）
+    """
+    import pandas as pd
+    df = pd.read_excel(xlsx_path, sheet_name='工作表1', header=None)
+    rows = []
+    for _, r in df.iterrows():
+        if str(r[0]).strip() in ('站點名稱', 'nan', ''):
+            continue
+        try:
+            lat, lon = float(r[11]), float(r[12])
+        except (ValueError, TypeError):
+            continue
+        rows.append({
+            "station": str(r[0]).strip(),
+            "type": str(r[3]).strip(),
+            "id": str(r[6]).strip(),
+            "lat": lat,
+            "lon": lon,
+        })
+    return rows
+
+
+def _lookup_coord(instrument_rows, csv_stem, station_key):
+    """依 CSV 檔名（去副檔名）與站名，於儀器清單中找對應座標。
+
+    比對規則：設備編號等於檔名去括號前綴、或等於完整檔名；優先同站。
+    回傳 (lat, lon) 或 None。"""
+    iid = csv_stem.split('(')[0].strip()
+    cand = [x for x in instrument_rows
+            if (x['id'] == iid or x['id'] == csv_stem) and x['station'] == station_key]
+    if not cand:  # 放寬：跨站以編號比對
+        cand = [x for x in instrument_rows if x['id'] == iid or x['id'] == csv_stem]
+    if not cand:
+        return None
+    return cand[0]['lat'], cand[0]['lon']
+
+
+def discover_nongnss_sites(batch_dir, gnss_source_dir, instrument_list_path):
+    """
+    為非 GNSS 監測儀器自動建立提取站點配置。
+
+    座標來源為儀器清單 Excel（WGS84），與 GNSS（由資料檔 E/N 取得）不同。
+    每個 (站點, 感測器) 產生一筆配置，輸出至 {站名}/{感測器}/ 子目錄。
+
+    Returns:
+        List of site configs（含 out_subdir），可傳入 run_batch()
+    """
+    instrument_rows = read_instrument_list(instrument_list_path)
+    print(f"  儀器清單: {len(instrument_rows)} 筆有效座標")
+
+    # 找各站 shapefile（需 .shp + .dbf）
+    shp_files = {}
+    for f in os.listdir(batch_dir):
+        if f.endswith('.shp') and os.path.exists(os.path.join(batch_dir, f.replace('.shp', '.dbf'))):
+            match = re.match(r'^(\d+)_', f)
+            if match:
+                shp_files[match.group(1)] = os.path.join(batch_dir, f)
+
+    station_dirs = {}
+    for d in os.listdir(gnss_source_dir):
+        match = re.match(r'^(\d+)_', d)
+        if match:
+            station_dirs[match.group(1)] = d
+
+    sites = []
+    for station_num, shp_path in sorted(shp_files.items()):
+        station_dir_name = station_dirs.get(station_num)
+        if not station_dir_name:
+            continue
+        station_key = station_dir_name.split('_', 1)[1] if '_' in station_dir_name else station_dir_name
+
+        for sensor in NON_GNSS_SENSORS:
+            sensor_dir = os.path.join(gnss_source_dir, station_dir_name, sensor)
+            if not os.path.isdir(sensor_dir):
+                continue
+
+            instruments = []
+            for f in sorted(os.listdir(sensor_dir)):
+                if not f.endswith('.csv'):
+                    continue
+                stem = os.path.splitext(f)[0]
+                coord = _lookup_coord(instrument_rows, stem, station_key)
+                if coord is None:
+                    print(f"  警告: {station_num}/{sensor}/{stem} 於儀器清單無座標，跳過")
+                    continue
+                lat, lon = coord
+                if not (21.5 <= lat <= 25.5 and 119.5 <= lon <= 122.5):
+                    print(f"  警告: {station_num}/{sensor}/{stem} 座標異常 (lat={lat}, lon={lon})，跳過")
+                    continue
+                e, n = wgs84_to_twd97(lon, lat)
+                instruments.append({"name": stem, "e": e, "n": n})
+
+            if instruments:
+                sites.append({
+                    "site": station_dir_name,
+                    "out_subdir": os.path.join(station_dir_name, sensor),
+                    "shp": shp_path,
+                    "instruments": instruments,
+                })
+                print(f"  站號 {station_num} / {sensor}: {len(instruments)} 支儀器")
+
+    return sites
+
+
+# ==============================================================================
 # 批次處理設定：3 個 InSAR 站點的 GNSS 儀器座標 (TWD97/TM2)
 # 座標來源：從各站 GNSS 數據檔的解算後 E/N 值取平均
 # ==============================================================================
@@ -394,38 +671,65 @@ INSAR_OUTPUT_DIR = r"data\insar_extracted"
 INSAR_ZEROED_DIR = r"data\insar_zeroed"
 
 
-def run_batch(mode="nearest", radius=50, output_dir=INSAR_OUTPUT_DIR,
-              zero_date=None, zeroed_dir=INSAR_ZEROED_DIR):
+def run_batch(sites=None, mode="nearest", radius=50, output_dir=INSAR_OUTPUT_DIR,
+              zero_date=None, zeroed_dir=INSAR_ZEROED_DIR, field_date_map=None,
+              field_date_maps=None, auto_zero=False):
     """
     批次提取所有站點的 InSAR 時間序列
 
     Args:
+        sites: 站點配置列表，None 時使用預設 BATCH_SITES
         mode: "nearest", "average", 或 "both"
         radius: average 模式的搜尋半徑（公尺）
         output_dir: 提取結果輸出目錄
         zero_date: 歸零日期 (YYYY-MM-DD)，None 時不歸零
         zeroed_dir: 歸零結果輸出目錄
+        field_date_map: 欄位→日期對照表，None 時使用預設 FIELD_DATE_MAP
+        field_date_maps: {欄位數: 日期對照表} 字典，按站點欄位數自動選擇
+        auto_zero: True 時各站自動以其 InSAR 起始日期 (Field5) 歸零
     """
+    if sites is None:
+        sites = BATCH_SITES
     os.makedirs(output_dir, exist_ok=True)
 
-    for site_config in BATCH_SITES:
+    for site_config in sites:
         site_name = site_config["site"]
         shp_path = site_config["shp"]
         instruments = site_config["instruments"]
+        # 輸出子目錄，預設為站名；非 GNSS 感測器帶入 "{站名}/{感測器}" 以分類
+        out_subdir = site_config.get("out_subdir", site_name)
 
         print(f"\n{'='*60}")
-        print(f"站點: {site_name}")
+        print(f"站點: {site_name}" + (f" [{out_subdir}]" if out_subdir != site_name else ""))
         print(f"{'='*60}")
 
         if not os.path.exists(shp_path):
             print(f"  錯誤: shapefile 不存在 — {shp_path}")
             continue
 
+        # 根據欄位數選擇日期對照表
+        site_fdm = field_date_map
+        if field_date_maps:
+            sf = shapefile.Reader(shp_path)
+            fc = len([f[0] for f in sf.fields[1:] if f[0].strip().startswith('Field')])
+            site_fdm = field_date_maps.get(fc)
+            if not site_fdm:
+                # 日期數可能多於欄位數，取前 fc 個日期
+                for map_fc, fdm_candidate in sorted(field_date_maps.items()):
+                    if map_fc >= fc:
+                        site_fdm = {f"Field{5+i}": fdm_candidate[f"Field{5+i}"] for i in range(fc)}
+                        break
+            if site_fdm:
+                print(f"  日期對照: {fc} 欄位 ({site_fdm['Field5']}~{site_fdm[f'Field{4+fc}']})")
+            else:
+                print(f"  警告: 找不到 {fc} 欄位的日期對照表")
+
         for m in (["nearest", "average"] if mode == "both" else [mode]):
-            results = extract_batch(shp_path, instruments, mode=m, radius=radius)
+            results = extract_batch(shp_path, instruments, mode=m, radius=radius,
+                                       field_date_map=site_fdm)
 
             # 儲存原始提取結果
-            site_dir = os.path.join(output_dir, site_name, m)
+            site_dir = os.path.join(output_dir, out_subdir, m)
             os.makedirs(site_dir, exist_ok=True)
 
             for inst, result in results:
@@ -436,13 +740,16 @@ def run_batch(mode="nearest", radius=50, output_dir=INSAR_OUTPUT_DIR,
             print(f"  -> {m} 提取已儲存 {len(results)} 個檔案至 {site_dir}")
 
             # 歸零處理
-            if zero_date:
-                zeroed_site_dir = os.path.join(zeroed_dir, site_name, m)
+            site_zero = zero_date
+            if not site_zero and auto_zero and site_fdm:
+                site_zero = site_fdm.get("Field5")
+            if site_zero:
+                zeroed_site_dir = os.path.join(zeroed_dir, out_subdir, m)
                 os.makedirs(zeroed_site_dir, exist_ok=True)
 
                 for inst, result in results:
                     ts = result["timeseries"]
-                    zeroed_ts, info = zero_timeseries(ts, zero_date)
+                    zeroed_ts, info = zero_timeseries(ts, site_zero)
                     fname = f"{inst['name']}.csv"
                     out_path = os.path.join(zeroed_site_dir, fname)
                     save_timeseries_csv(
@@ -451,7 +758,7 @@ def run_batch(mode="nearest", radius=50, output_dir=INSAR_OUTPUT_DIR,
                     )
 
                 print(f"  -> {m} 歸零已儲存 {len(results)} 個檔案至 {zeroed_site_dir}"
-                      f" (基準: {zero_date}, {info['method']})")
+                      f" (基準: {site_zero}, {info['method']})")
 
 
 def main():
@@ -463,8 +770,11 @@ def main():
   # 單一座標 (WGS84)
   python extract_insar.py single <shp> <lat> <lon> --mode nearest
 
-  # 批次提取 3 個站點所有 GNSS 儀器
+  # 批次提取（硬編碼站點）
   python extract_insar.py batch --mode both --radius 100
+
+  # 批次提取（自動發現）
+  python extract_insar.py batch --batch data/insar-batches/05_MT --gnss-source data/batches/08_監測數據-seperated
         """
     )
     subparsers = parser.add_subparsers(dest="command")
@@ -479,17 +789,29 @@ def main():
     p_single.add_argument("-o", "--output", help="輸出 CSV 路徑")
 
     # batch 子命令
-    p_batch = subparsers.add_parser("batch", help="批次提取 3 個站點")
+    p_batch = subparsers.add_parser("batch", help="批次提取站點")
+    p_batch.add_argument("--batch", "-b", type=str, metavar="PATH",
+                         help="InSAR 批次資料夾 (自動發現 shp 檔並匹配 GNSS 座標)")
+    p_batch.add_argument("--gnss-source", type=str, metavar="PATH",
+                         help="GNSS 分類後資料夾 (搭配 --batch 使用，如 data/batches/08_監測數據-seperated)")
+    p_batch.add_argument("--field-dates", type=str, metavar="CSV",
+                         help="欄位→日期對照表 CSV (格式: Field5,2022/01/23)")
+    p_batch.add_argument("--non-gnss", action="store_true",
+                         help="改為提取非 GNSS 監測儀器 (水位/伸縮計/傾斜計/雨量)，需搭配 --instrument-list")
+    p_batch.add_argument("--instrument-list", type=str, metavar="XLSX",
+                         help="儀器清單 Excel (提供非 GNSS 儀器之 WGS84 座標)")
     p_batch.add_argument("--mode", choices=["nearest", "average", "both"], default="both",
                          help="提取模式 (預設: both)")
     p_batch.add_argument("--radius", type=float, default=100,
                          help="average 模式的搜尋半徑，公尺 (預設: 100)")
-    p_batch.add_argument("-o", "--output-dir", default=INSAR_OUTPUT_DIR,
-                         help=f"輸出目錄 (預設: {INSAR_OUTPUT_DIR})")
+    p_batch.add_argument("-o", "--output-dir", default=None,
+                         help=f"輸出目錄 (預設: {{batch}}-extracted 或 {INSAR_OUTPUT_DIR})")
     p_batch.add_argument("--zero-date", default=None,
                          help="歸零基準日期 YYYY-MM-DD (預設: 不歸零)")
-    p_batch.add_argument("--zeroed-dir", default=INSAR_ZEROED_DIR,
-                         help=f"歸零結果輸出目錄 (預設: {INSAR_ZEROED_DIR})")
+    p_batch.add_argument("--auto-zero", action="store_true",
+                         help="各站自動以其 InSAR 起始日期歸零")
+    p_batch.add_argument("--zeroed-dir", default=None,
+                         help=f"歸零結果輸出目錄 (預設: {{batch}}-zeroed 或 {INSAR_ZEROED_DIR})")
 
     args = parser.parse_args()
 
@@ -514,8 +836,52 @@ def main():
                 print(f"{date_str:<14} {val:>16.6f}")
 
     elif args.command == "batch":
-        run_batch(mode=args.mode, radius=args.radius, output_dir=args.output_dir,
-                  zero_date=args.zero_date, zeroed_dir=args.zeroed_dir)
+        if args.batch:
+            # 批次目錄模式
+            batch_path = args.batch.rstrip('/\\')
+            output_dir = args.output_dir or (batch_path + '-extracted')
+            zeroed_dir = args.zeroed_dir or (batch_path + '-zeroed')
+
+            if not args.gnss_source:
+                print("錯誤: --batch 模式需要指定 --gnss-source (GNSS 分類後資料夾)")
+                sys.exit(1)
+
+            # 載入日期對照表
+            fdm = None
+            fdms = None
+            if args.field_dates:
+                fdm = load_field_dates(args.field_dates)
+                print(f"已載入日期對照表: {len(fdm)} 個欄位")
+            else:
+                # 自動載入 T*.xlsx 日期對照表
+                print("載入日期對照表...")
+                fdms = load_date_mappings(batch_path)
+                if not fdms:
+                    print("  未找到日期對照表 (T*.xlsx)，將使用欄位名稱作為時間標籤")
+
+            # 發現站點
+            print(f"\n掃描 InSAR 資料: {batch_path}")
+            if args.non_gnss:
+                if not args.instrument_list:
+                    print("錯誤: --non-gnss 模式需要指定 --instrument-list (儀器清單 Excel)")
+                    sys.exit(1)
+                sites = discover_nongnss_sites(batch_path, args.gnss_source, args.instrument_list)
+            else:
+                sites = discover_batch_sites(batch_path, args.gnss_source)
+            if not sites:
+                print("無法發現有效的站點配置")
+                sys.exit(1)
+
+            run_batch(sites=sites, mode=args.mode, radius=args.radius,
+                      output_dir=output_dir, zero_date=args.zero_date,
+                      zeroed_dir=zeroed_dir, field_date_map=fdm,
+                      field_date_maps=fdms, auto_zero=args.auto_zero)
+        else:
+            # 原始硬編碼模式
+            output_dir = args.output_dir or INSAR_OUTPUT_DIR
+            zeroed_dir = args.zeroed_dir or INSAR_ZEROED_DIR
+            run_batch(mode=args.mode, radius=args.radius, output_dir=output_dir,
+                      zero_date=args.zero_date, zeroed_dir=zeroed_dir)
 
     else:
         parser.print_help()
