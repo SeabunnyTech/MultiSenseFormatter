@@ -20,7 +20,7 @@ class BaseProcessor(ABC):
     支援同一感測器的多種表頭格式
     """
 
-    def __init__(self, config, zero_date_str, force_overwrite=False, zero_date_map=None):
+    def __init__(self, config, zero_date_str, force_overwrite=False, insar_dates_map=None):
         self.config = config
         self.sensor_name = config["sensor_name"]
         self.target_subdir = config["target_subdir"]
@@ -31,10 +31,13 @@ class BaseProcessor(ABC):
 
         self.zero_date = self._parse_zero_date(zero_date_str)
         self.default_zero_date = self.zero_date
-        self.zero_date_map = {}
-        if zero_date_map:
-            for k, v in zero_date_map.items():
-                self.zero_date_map[k] = self._parse_zero_date(v)
+        # 站號 → 該站 InSAR 影像日期清單（已排序）。用於逐儀器決定歸零起始日。
+        self.insar_dates_map = {}
+        if insar_dates_map:
+            for station, dates in insar_dates_map.items():
+                self.insar_dates_map[station] = sorted(self._parse_zero_date(d) for d in dates)
+        # 目前處理中檔案所屬站別的 InSAR 影像日期清單
+        self.current_insar_dates = None
 
     def _parse_zero_date(self, zero_date_str):
         """解析歸零日期字串"""
@@ -43,6 +46,30 @@ class BaseProcessor(ABC):
         except ValueError:
             print(f"{Colors.RED}ERROR: 無效的日期格式 '{zero_date_str}'，請使用 YYYY-MM-DD{Colors.ENDC}")
             sys.exit(1)
+
+    def _resolve_insar_zero_date(self, df_daily):
+        """
+        以「監測開始後第一個 InSAR 影像日期」作為該儀器的歸零起始日。
+
+        - 有設定 InSAR 影像清單時：取 >= 監測起始日的第一個影像日期為 self.zero_date；
+          若監測起始日之後無任何影像日期，回傳 False（此檔跳過）。
+        - 未設定時：維持預設歸零日期，回傳 True。
+
+        設定 self.zero_date 後，後續篩選會自動只保留 >= 該日的資料，
+        故輸出即以此日期為起點，之前的資料被忽略。
+        """
+        if self.current_insar_dates is None:
+            return True
+
+        monitoring_start = df_daily['date_only'].min()
+        candidates = [d for d in self.current_insar_dates if d >= monitoring_start]
+        if not candidates:
+            print(f"{Colors.YELLOW}  -> 跳過 (監測開始 {monitoring_start} 之後無 InSAR 影像日期){Colors.ENDC}")
+            return False
+
+        self.zero_date = candidates[0]
+        print(f"  -> InSAR 歸零起始日: {self.zero_date} (監測開始 {monitoring_start} 後第一張影像)")
+        return True
 
     def run(self):
         """主執行流程"""
@@ -208,10 +235,12 @@ class BaseProcessor(ABC):
         file_name = os.path.basename(input_file_path)
         location_name = self._get_location_name(input_file_path)
 
-        # 按站號套用歸零日期
-        if self.zero_date_map:
+        # 按站號取得該站 InSAR 影像日期清單（實際歸零日於讀取資料後、依監測起始日決定）
+        self.zero_date = self.default_zero_date
+        self.current_insar_dates = None
+        if self.insar_dates_map:
             station_num = location_name.split('_')[0]
-            self.zero_date = self.zero_date_map.get(station_num, self.default_zero_date)
+            self.current_insar_dates = self.insar_dates_map.get(station_num)
 
         # 顯示進度
         progress_prefix = f"[{i:>{len(str(total_files))}}/{total_files}]"
@@ -306,6 +335,10 @@ class ZeroingProcessor(BaseProcessor):
         # 1. 時間處理與每日採樣
         df_daily = self._prepare_daily_data(df, time_col)
         if df_daily is None:
+            return None
+
+        # 1b. 依 InSAR 影像日期決定歸零起始日（監測開始後第一張影像）
+        if not self._resolve_insar_zero_date(df_daily):
             return None
 
         # 2. 驗證日期範圍
@@ -410,9 +443,9 @@ class SeasonalRainfallProcessor(BaseProcessor):
     每個季節開始時累積歸零
     """
 
-    def __init__(self, config, force_overwrite=False, zero_date_map=None):
+    def __init__(self, config, force_overwrite=False, insar_dates_map=None):
         # 雨量計不使用歸零日期，傳入一個不影響處理的預設值
-        super().__init__(config, zero_date_str="1900-01-01", force_overwrite=force_overwrite, zero_date_map=zero_date_map)
+        super().__init__(config, zero_date_str="1900-01-01", force_overwrite=force_overwrite, insar_dates_map=insar_dates_map)
         self.enable_cumulative = False  # 不使用通用累計邏輯
 
         # 季節設定
@@ -469,6 +502,10 @@ class SeasonalRainfallProcessor(BaseProcessor):
             print(f"{Colors.YELLOW}  -> 跳過 (無資料){Colors.ENDC}")
             return None
 
+        # 1b. 依 InSAR 影像日期決定輸出起始日（監測開始後第一張影像）
+        if not self._resolve_insar_zero_date(df):
+            return None
+
         # 2. 計算每筆資料的季節和季節起始日
         df['_season_info'] = df[time_col].apply(self._get_season)
         df['_season'] = df['_season_info'].apply(lambda x: x[0])
@@ -477,6 +514,12 @@ class SeasonalRainfallProcessor(BaseProcessor):
         # 3. 按季節分組計算累積
         # 使用 season_start 作為分組依據（這樣每個季節週期都是獨立的）
         df[output_col] = df.groupby('_season_start')[value_col].cumsum()
+
+        # 3b. 僅輸出 InSAR 起始日之後的資料（季節累積仍以完整資料計算）
+        df = df[df['date_only'] >= self.zero_date].copy()
+        if df.empty:
+            print(f"{Colors.YELLOW}  -> 跳過 (InSAR 起始日之後無資料){Colors.ENDC}")
+            return None
 
         # 4. 建立輸出 DataFrame
         output_df = pd.DataFrame()
@@ -500,8 +543,8 @@ class GNSSProcessor(BaseProcessor):
     7.  可選：將三維位移投影至 SAR 雷達視線方向 (LOS)
     """
 
-    def __init__(self, config, zero_date_str, force_overwrite=False, zero_date_map=None):
-        super().__init__(config, zero_date_str, force_overwrite, zero_date_map=zero_date_map)
+    def __init__(self, config, zero_date_str, force_overwrite=False, insar_dates_map=None):
+        super().__init__(config, zero_date_str, force_overwrite, insar_dates_map=insar_dates_map)
         # 用於暫存 TXT 輸出資料
         self._txt_output_df = None
         # 多衛星 LOS 投影設定
@@ -614,10 +657,12 @@ class GNSSProcessor(BaseProcessor):
         file_name = os.path.basename(input_file_path)
         location_name = self._get_location_name(input_file_path)
 
-        # 按站號套用歸零日期
-        if self.zero_date_map:
+        # 按站號取得該站 InSAR 影像日期清單（實際歸零日於讀取資料後、依監測起始日決定）
+        self.zero_date = self.default_zero_date
+        self.current_insar_dates = None
+        if self.insar_dates_map:
             station_num = location_name.split('_')[0]
-            self.zero_date = self.zero_date_map.get(station_num, self.default_zero_date)
+            self.current_insar_dates = self.insar_dates_map.get(station_num)
 
         # 顯示進度
         progress_prefix = f"[{i:>{len(str(total_files))}}/{total_files}]"
@@ -720,6 +765,10 @@ class GNSSProcessor(BaseProcessor):
 
         if df_daily.empty:
             print(f"{Colors.YELLOW}  -> 跳過 (無有效資料){Colors.ENDC}")
+            return None
+
+        # 1b. 依 InSAR 影像日期決定歸零起始日（監測開始後第一張影像）
+        if not self._resolve_insar_zero_date(df_daily):
             return None
 
         # 2. 驗證日期範圍

@@ -17,30 +17,32 @@ SENSOR_REGISTRY = {
 }
 
 
-def build_zero_date_map(insar_batch_dir):
-    """從 InSAR 批次目錄建立 站號→歸零日期 映射（各站以其 2018 年第一個 InSAR 影像日期歸零）"""
+def build_insar_dates_map(insar_batch_dir):
+    """
+    從 InSAR 批次目錄建立 站號 → 完整影像日期清單 映射。
+
+    歸零起始日不再固定，而是在處理各儀器時取「監測開始後第一個 InSAR 影像
+    日期」，因此這裡回傳每站的完整影像日期清單（YYYY-MM-DD，已排序）。
+    """
     import pandas as pd
     import shapefile as shp_module
 
-    # 1. 載入 T*.xlsx，找各軌道 2018 年第一個影像日期
-    track_zero_dates = {}  # {date_count: zero_date_str}
+    # 1. 載入各軌道 T*.xlsx 的完整影像日期清單（以影像日期數為鍵，供 shapefile 欄位數比對）
+    track_dates = {}  # {date_count: [YYYY-MM-DD, ...]}
     for f in sorted(os.listdir(insar_batch_dir)):
         if not (f.startswith('T') and f.endswith('.xlsx')):
             continue
         df = pd.read_excel(os.path.join(insar_batch_dir, f), header=None)
-        dates = [str(d).strip() for d in df[0] if len(str(d).strip()) == 8 and str(d).strip().isdigit()]
-        dates_2018 = [d for d in dates if d.startswith('2018')]
-        if not dates_2018:
-            continue
-        first_2018 = dates_2018[0]
-        zero_str = f"{first_2018[:4]}-{first_2018[4:6]}-{first_2018[6:8]}"
-        # 註冊精確數量和 -1（T54 有 55 個有效日期但只有 54 個欄位）
-        track_zero_dates[len(dates)] = zero_str
-        track_zero_dates[len(dates) - 1] = zero_str
-        print(f"  {f}: 2018 第一張影像 {zero_str} ({len(dates)} 個日期)")
+        raw = [str(d).strip() for d in df[0] if len(str(d).strip()) == 8 and str(d).strip().isdigit()]
+        date_strs = sorted(f"{d[:4]}-{d[4:6]}-{d[6:8]}" for d in raw)
+        # 註冊精確數量和 -1（例：T54 有 55 個有效日期但 shapefile 只有 54 個欄位）
+        track_dates[len(raw)] = date_strs
+        track_dates[len(raw) - 1] = date_strs
+        if date_strs:
+            print(f"  {f}: {len(raw)} 個影像日期 ({date_strs[0]} ~ {date_strs[-1]})")
 
-    # 2. 從 shapefile 欄位數判斷各站所屬軌道
-    zero_map = {}
+    # 2. 從 shapefile 欄位數判斷各站所屬軌道，取得該軌道完整影像日期清單
+    dates_map = {}
     for f in sorted(os.listdir(insar_batch_dir)):
         if not f.endswith('.shp'):
             continue
@@ -51,13 +53,12 @@ def build_zero_date_map(insar_batch_dir):
         try:
             sf = shp_module.Reader(os.path.join(insar_batch_dir, f))
             fc = len([fd[0] for fd in sf.fields[1:] if fd[0].strip().startswith('Field')])
-            zero_date = track_zero_dates.get(fc)
-            if zero_date:
-                zero_map[station] = zero_date
+            if fc in track_dates:
+                dates_map[station] = track_dates[fc]
         except Exception:
             continue
 
-    return zero_map
+    return dates_map
 
 
 def parse_args():
@@ -108,7 +109,7 @@ def parse_args():
         '--insar-batch',
         type=str,
         metavar='PATH',
-        help='InSAR 批次資料夾路徑，各站以其 2018 年第一個 InSAR 影像日期歸零'
+        help='InSAR 批次資料夾路徑；各儀器以「監測開始後第一個 InSAR 影像日期」為歸零起始日'
     )
     return parser.parse_args()
 
@@ -133,16 +134,16 @@ def main():
             print(f"請先執行: python split_excel_by_location.py --batch {batch_path}")
             sys.exit(1)
 
-    # 建立各站歸零日期映射
-    zero_date_map = None
+    # 建立各站 InSAR 影像日期映射（實際歸零起始日於處理各儀器時，依監測起始日決定）
+    insar_dates_map = None
     if args.insar_batch:
-        print(f"從 InSAR 批次建立歸零日期映射: {args.insar_batch}")
-        zero_date_map = build_zero_date_map(args.insar_batch)
-        if zero_date_map:
-            for station, zd in sorted(zero_date_map.items()):
-                print(f"  站號 {station}: 歸零日期 {zd}")
+        print(f"從 InSAR 批次建立影像日期映射: {args.insar_batch}")
+        insar_dates_map = build_insar_dates_map(args.insar_batch)
+        if insar_dates_map:
+            for station, dates in sorted(insar_dates_map.items()):
+                print(f"  站號 {station}: {len(dates)} 個影像日期 ({dates[0]} ~ {dates[-1]})")
         else:
-            print("  警告: 無法建立歸零日期映射，將使用預設日期")
+            print("  警告: 無法建立影像日期映射，將使用預設歸零日期")
 
     # 決定要執行哪些感測器
     selected = args.sensor if args.sensor else list(SENSOR_REGISTRY.keys())
@@ -158,9 +159,9 @@ def main():
 
         # SeasonalRainfallProcessor 不需要 zero_date_str
         if proc_cls is SeasonalRainfallProcessor:
-            processor = proc_cls(config=config, force_overwrite=args.force, zero_date_map=zero_date_map)
+            processor = proc_cls(config=config, force_overwrite=args.force, insar_dates_map=insar_dates_map)
         else:
-            processor = proc_cls(config=config, zero_date_str=ZERO_DATE, force_overwrite=args.force, zero_date_map=zero_date_map)
+            processor = proc_cls(config=config, zero_date_str=ZERO_DATE, force_overwrite=args.force, insar_dates_map=insar_dates_map)
 
         processor.run()
 
